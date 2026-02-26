@@ -1,0 +1,97 @@
+# ============================================
+# Docker Compose - N-Tier Architecture (Fixed)
+# ============================================
+
+services:
+  # ============================================
+  # Database Service - PostgreSQL
+  # ============================================
+  db:
+    image: postgres:16-alpine
+    container_name: taskboard-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-taskboard_db}
+      POSTGRES_USER: ${POSTGRES_USER:-taskboard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskboard123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      # ใช้ pg_isready เพราะอยู่ใน container postgres
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-taskboard} -d $${POSTGRES_DB:-taskboard_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - taskboard-network
+
+  # ============================================
+  # API Service - Node.js Backend
+  # ============================================
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: taskboard-api
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=${PORT:-3000}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-taskboard_db}
+      - DB_USER=${DB_USER:-taskboard}
+      - DB_PASSWORD=${DB_PASSWORD:-taskboard123}
+      - CORS_ORIGIN=${CORS_ORIGIN:-https://localhost}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # ใช้ node ในการ fetch (เนื่องจาก image เป็น node-alpine)
+      test: ["CMD-SHELL", "node -e 'fetch(\"http://localhost:3000/api/health\").then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))'"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - taskboard-network
+
+  # ============================================
+  # Nginx Service - Web Server & Reverse Proxy
+  # ============================================
+  nginx:
+    image: nginx:alpine
+    container_name: taskboard-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # Nginx Alpine มักจะมี wget มาให้ หรือใช้การเช็ค port
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - taskboard-network
+
+# ============================================
+# Networks & Volumes
+# ============================================
+networks:
+  taskboard-network:
+    driver: bridge
+    name: taskboard-network
+
+volumes:
+  postgres_data:
+    name: taskboard-postgres-data
